@@ -103,26 +103,3 @@ class ReconciliationHandler:
             print("✅ Successfully processed all comments.")
 
             return summaries
-
-    # def handle_comments(llm):
-    #     os.makedirs(os.path.dirname(Config.RESOLVED_FOLDER), exist_ok=True)
-    #     os.makedirs(os.path.dirname(Config.UNRESOLVED_FOLDER), exist_ok=True)
-    #     df_comments = pd.read_csv(Config.REPLY_FILE, encoding='latin1')
-    #     summaries = []
-    #     for idx, row in df_comments.iterrows():
-    #         prompt = f"Transaction ID: {row['Transaction ID']}\nComment: {row['Comments']}\nDetermine if resolved. If resolved, say 'Resolved'. Else say 'Unresolved and summarize why.'"
-    #         result = llm.invoke(prompt)
-    #         print("llm_result:", result)
-
-    #         if "resolved" in result.lower():
-    #             save_path = os.path.join(Config.RESOLVED_FOLDER, f"{row['Transaction ID']}.txt")
-    #             with open(save_path, 'w') as f:
-    #                 f.write(row['Comments'])
-    #         else:
-    #             save_path = os.path.join(Config.UNRESOLVED_FOLDER, f"{row['Transaction ID']}.txt")
-    #             with open(save_path, 'w') as f:
-    #                 f.write(f"Summary: {result}\nOriginal Comment: {row['comments']}")
-    #         summaries.append({ "Transaction ID": row['Transaction ID'], "result": result })
-    #     print("Sucessfull")
-
-    #     return summaries
