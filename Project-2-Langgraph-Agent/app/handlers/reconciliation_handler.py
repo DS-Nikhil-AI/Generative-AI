@@ -1,13 +1,10 @@
 import os
 import json
-import pandas as pd
+from typing import TypedDict
 from app.config import Config
 from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
-from langchain_core.tools import tool
-from typing import TypedDict, Annotated
-import os
 import pandas as pd
+
 
 class CommentState(TypedDict):
     transaction_id: str
@@ -15,7 +12,6 @@ class CommentState(TypedDict):
     result: str
     status: str  # "resolved" or "unresolved"
     email_verified: bool
-
 
 class ReconciliationHandler:
 
@@ -31,75 +27,110 @@ class ReconciliationHandler:
         upload_path = (Config.UPLOAD_FOLDER)
         os.makedirs(os.path.dirname(upload_path), exist_ok=True)
         df.to_csv(upload_path, index=False)
+        print("### preprocessing completed..")
         return upload_path
+
 
     @staticmethod
     def handle_comments(llm):
-        os.makedirs(os.path.dirname(Config.RESOLVED_FOLDER), exist_ok=True)
-        os.makedirs(os.path.dirname(Config.UNRESOLVED_FOLDER), exist_ok=True)
-        os.makedirs(os.path.dirname(Config.PATTERN_FOLDER), exist_ok=True)
-        os.makedirs(os.path.dirname(Config.SUMMARY_FOLDER), exist_ok=True)
+        # Ensure output directories exist
+        os.makedirs(Config.RESOLVED_FOLDER, exist_ok=True)
+        os.makedirs(Config.UNRESOLVED_FOLDER, exist_ok=True)
+        os.makedirs(Config.PATTERN_FOLDER, exist_ok=True)
+        os.makedirs(Config.SUMMARY_FOLDER, exist_ok=True)
 
         df_comments = pd.read_csv(Config.REPLY_FILE, encoding='latin1')
+
+        # === NODE 1: Classifier ===
+        def classify_node(state: CommentState) -> CommentState:
+            prompt = (
+                f"Transaction ID: {state['transaction_id']}\n"
+                f"Comment: {state['comment']}\n"
+                "Step 1: Determine if this case is Resolved or Unresolved.\n"
+                "Step 2: If Resolved, explain briefly and suggest if similar cases can be closed automatically.\n"
+                "Step 3: If Unresolved, summarize the reason and suggest next steps.\n"
+                "Think step-by-step like a human agent."
+            )
+            result = llm.invoke(prompt)
+            print(f"classify_node for : {result}")
+            status = "resolved" if "resolved" in result.lower() else "unresolved"
+            return {**state, "result": result, "status": status}
+
+        # === NODE 2: Handle Resolved ===
+        def handle_resolved_node(state: CommentState) -> CommentState:
+            txn = state["transaction_id"]
+            result = state["result"]
+            comment = state["comment"]
+
+            with open(os.path.join(Config.RESOLVED_FOLDER, f"{txn}.txt"), 'w', encoding='utf-8') as f:
+                f.write(f"Resolution Details:\n{result}\nOriginal Comment:\n{comment}")
+
+            with open(os.path.join(Config.PATTERN_FOLDER, f"{txn}_pattern.txt"), 'w', encoding='utf-8') as f:
+                f.write(f"Identified Pattern:\n{result}")
+
+            return state
+
+        # === NODE 3: Handle Unresolved ===
+        def handle_unresolved_node(state: CommentState) -> CommentState:
+            txn = state["transaction_id"]
+            result = state["result"]
+            comment = state["comment"]
+
+            with open(os.path.join(Config.SUMMARY_FOLDER, f"{txn}_summary.txt"), 'w', encoding='utf-8') as f:
+                f.write(f"Summary Why Unresolved:\n{result}\nOriginal Comment:\n{comment}")
+
+            prompt = (
+                f"Transaction ID: {txn}\n"
+                f"Comment: {comment}\n"
+                "Since unresolved, list 3 next actions a support agent should take."
+            )
+            next_steps = llm.invoke(prompt)
+
+            with open(os.path.join(Config.UNRESOLVED_FOLDER, f"{txn}_next_steps.txt"), 'w', encoding='utf-8') as f:
+                f.write(f"Suggested Next Steps:\n{next_steps}")
+
+            return state
+
+        # === Conditional Router ===
+        def router(state: CommentState) -> str:
+            return "handle_resolved" if state["status"] == "resolved" else "handle_unresolved"
+
+        # === LangGraph ===
+        graph = StateGraph(CommentState)
+        graph.add_node("classify", classify_node)
+        graph.add_node("handle_resolved", handle_resolved_node)
+        graph.add_node("handle_unresolved", handle_unresolved_node)
+
+        graph.set_entry_point("classify")
+        graph.add_conditional_edges("classify", router, {
+            "handle_resolved": "handle_resolved",
+            "handle_unresolved": "handle_unresolved"
+        })
+
+        graph.add_edge("handle_resolved", END)
+        graph.add_edge("handle_unresolved", END)
+
+        app = graph.compile()
+
         summaries = []
-        c = 0
-        df_comments = pd.read_csv(Config.REPLY_FILE, encoding='latin1')
-        summaries = []
-        c=0
         for idx, row in df_comments.iterrows():
-            c=c+1
-            if c<1000:
-                transaction_id = str(row['Transaction ID'])
-                comment = row['Comments']
-                prompt = (
-                    f"Transaction ID: {transaction_id}\n"
-                    f"Comment: {comment}\n"
-                    "Step 1: Determine if this case is Resolved or Unresolved.\n"
-                    "Step 2: If Resolved, explain the reason shortly and suggest if similar cases can be closed automatically.\n"
-                    "Step 3: If Unresolved, summarize why it is unresolved and suggest clear next steps.\n"
-                    "Please think step-by-step like a human agent before giving the final response."
-                )
+            txn_id = str(row["Transaction ID"])
+            comment = row["Comments"]
+            input_state = {
+                "transaction_id": txn_id,
+                "comment": comment,
+                "result": "",
+                "status": ""
+            }
+            
 
-                result = llm.invoke(prompt)
-                print(f"llm_result for {transaction_id}: {result}")
+            final_state = app.invoke(input_state)
+            summaries.append({
+                "Transaction ID": final_state["transaction_id"],
+                "status": final_state["status"],
+                "result": final_state["result"]
+            })
+            print(f"summaries { txn_id}: {final_state}")
 
-                result_lower = result.lower()
-                if "resolved" in result_lower:
-                    save_path = os.path.join(Config.RESOLVED_FOLDER, f"{transaction_id}.txt")
-                    with open(save_path, 'w', encoding='utf-8') as f:
-                        f.write(f"Resolution Details:\n{result}\nOriginal Comment:\n{comment}")
-
-                    pattern_path = os.path.join(Config.PATTERN_FOLDER, f"{transaction_id}_pattern.txt")
-                    with open(pattern_path, 'w', encoding='utf-8') as f:
-                        f.write(f"Identified Pattern:\n{result}")
-
-                elif "unresolved" in result_lower:
-
-                    unresolved_summary_path = os.path.join(Config.SUMMARY_FOLDER, f"{transaction_id}_summary.txt")
-                    with open(unresolved_summary_path, 'w', encoding='utf-8') as f:
-                        f.write(f"Summary Why Unresolved:\n{result}\nOriginal Comment:\n{comment}")
-
-                    # Use Case 3: Suggest next steps
-                    next_steps_prompt = (
-                        f"Transaction ID: {transaction_id}\n"
-                        f"Comment: {comment}\n"
-                        "Since this case is Unresolved, list 3 actionable next steps a finance support agent should take to resolve it."
-                    )
-                    next_steps_result = llm.invoke(next_steps_prompt)
-
-                    unresolved_steps_path = os.path.join(Config.UNRESOLVED_FOLDER, f"{transaction_id}_next_steps.txt")
-                    with open(unresolved_steps_path, 'w', encoding='utf-8') as f:
-                        f.write(f"Suggested Next Steps:\n{next_steps_result}")
-
-                else:
-                    print(f"[WARN] Could not clearly classify result for Transaction ID: {transaction_id}")
-
-                summaries.append({
-                    "Transaction ID": transaction_id,
-                    "result": result
-                })
-                print()
-
-            print("✅ Successfully processed all comments.")
-
-            return summaries
+        print("✅ All comments processed via LangGraph branching.")
+        return summaries
